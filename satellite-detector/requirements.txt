@@ -1,0 +1,8 @@
+apscheduler
+pythonping
+ping3
+dnspython
+pandas
+seaborn
+matplotlib
+scipy
