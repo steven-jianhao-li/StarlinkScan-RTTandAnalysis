@@ -5,6 +5,7 @@ import shutil
 import json
 from datetime import datetime
 from multiprocessing import Queue, Process
+import signal
 import logging
 
 # --- Path Setup ---
@@ -13,10 +14,10 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 sys.path.append(SCRIPT_DIR)
 
-from utils.config_loader import load_config
-from utils.logger_setup import setup_logger
-from collection.icmp_collector import IcmpCollector
-from collection.dns_collector import DnsCollector
+from src.utils.config_loader import load_config
+from src.utils.logger_setup import setup_logger
+from src.collection.icmp_collector import IcmpCollector
+from src.collection.dns_collector import DnsCollector
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.executors.pool import ThreadPoolExecutor
@@ -24,7 +25,7 @@ from apscheduler.executors.pool import ThreadPoolExecutor
 # --- Global Variables ---
 config = None
 logger = None
-output_queue = Queue()
+output_queue = None  # Will be created in main() to avoid Windows spawn issues
 
 def get_task_id(task_name, targets):
     """Generates a unique ID for the current task."""
@@ -129,7 +130,15 @@ def main():
     shutil.copy(config_snapshot_path, os.path.join(task_dir, 'config.ini'))
     logger.info(f"Saved configuration snapshot to {task_dir}")
 
-    # 5. Start I/O Writer Process
+    # 5. Snapshot inputs for reproducibility
+    try:
+        shutil.copy(target_file_path, os.path.join(task_dir, 'targets.txt'))
+        logger.info("Saved targets snapshot.")
+    except Exception as e:
+        logger.warning(f"Failed to snapshot targets file: {e}")
+
+    # 6. Start I/O Writer Process
+    output_queue = Queue()
     output_file = os.path.join(task_dir, 'raw_data.jsonl')
     io_process = Process(
         target=io_writer_process,
@@ -137,13 +146,18 @@ def main():
     )
     io_process.start()
 
-    # 6. Configure Scheduler and Thread Pool
+    # 7. Configure Scheduler and Thread Pool
     executors = {
         'default': ThreadPoolExecutor(config.getint('General', 'worker_threads', fallback=10))
     }
-    scheduler = BackgroundScheduler(executors=executors)
+    job_defaults = {
+        'coalesce': True,                 # Combine missed runs into one
+        'max_instances': 1,               # Avoid overlapping probes per job
+        'misfire_grace_time': 10          # Seconds to allow late runs
+    }
+    scheduler = BackgroundScheduler(executors=executors, job_defaults=job_defaults)
 
-    # 7. Schedule Probing Jobs
+    # 8. Schedule Probing Jobs
     probe_interval = config.getint('Scheduler', 'probe_interval_seconds', fallback=1)
     
     for target_ip in targets:
@@ -153,7 +167,8 @@ def main():
                 icmp_collector.run_probe,
                 'interval',
                 seconds=probe_interval,
-                id=f'icmp_{target_ip}'
+                id=f'icmp_{target_ip}',
+                replace_existing=True
             )
             logger.info(f"Scheduled ICMP probes for {target_ip} every {probe_interval}s.")
 
@@ -163,14 +178,25 @@ def main():
                 dns_collector.run_probe,
                 'interval',
                 seconds=probe_interval,
-                id=f'dns_{target_ip}'
+                id=f'dns_{target_ip}',
+                replace_existing=True
             )
             logger.info(f"Scheduled DNS probes for {target_ip} every {probe_interval}s.")
 
-    # 8. Start the Scheduler and Wait
+    # 9. Start the Scheduler and Wait
     scheduler.start()
     logger.info("Scheduler started. Probing is now active.")
     print("Probing started. Press Ctrl+C to stop.")
+
+    # Handle graceful shutdown on SIGTERM as well
+    def _handle_term(signum, frame):
+        raise KeyboardInterrupt()
+
+    try:
+        signal.signal(signal.SIGTERM, _handle_term)
+    except Exception:
+        # Some environments may not support signal operations (e.g., certain Windows contexts)
+        pass
 
     try:
         # Keep the main thread alive
