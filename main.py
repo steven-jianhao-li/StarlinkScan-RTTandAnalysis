@@ -183,10 +183,13 @@ def main():
             )
             logger.info(f"Scheduled DNS probes for {target_ip} every {probe_interval}s.")
 
-    # 9. Start the Scheduler and Wait
+    # 9. Start the Scheduler and Wait (bounded by configured duration)
     scheduler.start()
     logger.info("Scheduler started. Probing is now active.")
-    print("Probing started. Press Ctrl+C to stop.")
+
+    run_duration = config.getint('Scheduler', 'run_duration_seconds', fallback=300)
+    logger.info(f"Probing will run for {run_duration} seconds as configured.")
+    print(f"Probing started. Will run for {run_duration} seconds...")
 
     # Handle graceful shutdown on SIGTERM as well
     def _handle_term(signum, frame):
@@ -198,20 +201,40 @@ def main():
         # Some environments may not support signal operations (e.g., certain Windows contexts)
         pass
 
+    shutdown_reason = "duration-complete"
     try:
-        # Keep the main thread alive
-        while True:
+        # Keep the main thread alive for the configured duration
+        end_time = time.time() + run_duration
+        while time.time() < end_time:
             time.sleep(1)
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Shutdown signal received. Shutting down scheduler and I/O process.")
-        scheduler.shutdown()
+        shutdown_reason = "signal"
+    finally:
+        logger.info(f"Shutting down due to: {shutdown_reason}. Stopping scheduler and I/O process...")
+        try:
+            scheduler.shutdown()
+        except Exception as e:
+            logger.warning(f"Scheduler shutdown encountered an issue: {e}")
         # Send sentinel value to stop the I/O process
-        output_queue.put(None)
-        io_process.join(timeout=5) # Wait for the I/O process to finish
+        try:
+            output_queue.put(None)
+        except Exception:
+            pass
+        io_process.join(timeout=5)  # Wait for the I/O process to finish
         if io_process.is_alive():
             logger.warning("I/O process did not terminate gracefully. Forcing termination.")
             io_process.terminate()
-        logger.info("Shutdown complete.")
+        logger.info("Probe phase shutdown complete. Proceeding to analysis...")
+
+    # 10. Run Analysis automatically
+    try:
+        from src.analysis.rtt_analyzer import RTTAnalyzer
+        # Reuse the same log directory; analyzer will log into task dir
+        analyzer = RTTAnalyzer(task_dir)
+        analyzer.run()
+        logger.info("Automated analysis finished. Outputs saved under 'plots/'.")
+    except Exception as e:
+        logger.error(f"Automated analysis failed: {e}", exc_info=True)
 
 
 if __name__ == '__main__':
