@@ -31,8 +31,8 @@ class RTTAnalyzer(BaseAnalyzer):
         logger.info("Starting RTT analysis...")
         
         # --- Data Cleaning ---
-        # Filter out unsuccessful probes for RTT calculations
-        success_df = self.df[self.df['status'] == 'success'].copy()
+        # 仅使用成功且具有 RTT 数值的条目进行 RTT 统计与绘图
+        success_df = self.df[(self.df['status'] == 'success') & (self.df['rtt_ms'].notnull())].copy()
         if success_df.empty:
             logger.warning("No successful probes found. Cannot perform RTT analysis.")
             return
@@ -62,8 +62,8 @@ class RTTAnalyzer(BaseAnalyzer):
     def calculate_descriptive_stats(self, df):
         """Calculates and logs descriptive statistics for RTTs."""
         logger.info("--- Descriptive RTT Statistics (ms) ---")
-        stats = df.groupby('target_ip')['rtt_ms'].describe()
-        logger.info("\n" + stats.to_string())
+        stats_df = df.groupby(['target_ip', 'probe_type'])['rtt_ms'].describe()
+        logger.info("\n" + stats_df.to_string())
 
     def perform_ks_test(self, df):
         """

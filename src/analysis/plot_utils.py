@@ -5,6 +5,16 @@ import logging
 
 logger = logging.getLogger("SatelliteDetector.PlotUtils")
 
+# Global plotting aesthetics
+sns.set_theme(context='talk', style='whitegrid', palette='Set2')
+plt.rcParams.update({
+    'axes.titlesize': 16,
+    'axes.labelsize': 14,
+    'legend.fontsize': 11,
+    'xtick.labelsize': 11,
+    'ytick.labelsize': 11,
+})
+
 def save_plot(fig, save_dir, filename, dpi=300):
     """
     Saves a matplotlib figure to a specified directory.
@@ -29,17 +39,22 @@ def plot_rtt_timeseries(df, save_dir):
     """
     Plots RTT over time for each target IP and probe type.
     """
-    plt.style.use('seaborn-v0_8-whitegrid')
-    fig, ax = plt.subplots(figsize=(15, 7))
-    
-    sns.lineplot(data=df, x='timestamp', y='rtt_ms', hue='target_ip', style='probe_type', ax=ax, marker='o', markersize=4)
-    
+    fig, ax = plt.subplots(figsize=(16, 7))
+
+    # Draw smoother lines without markers; separate hue/style
+    sns.lineplot(
+        data=df.sort_values('timestamp'),
+        x='timestamp', y='rtt_ms',
+        hue='target_ip', style='probe_type',
+        ax=ax, linewidth=1.6, alpha=0.9, marker=None, errorbar=None
+    )
+
     ax.set_title('RTT Time Series')
     ax.set_xlabel('Timestamp')
     ax.set_ylabel('RTT (ms)')
-    ax.legend(title='Target & Type')
-    ax.tick_params(axis='x', rotation=45)
-    
+    ax.legend(title='Target & Type', ncol=2, frameon=True)
+    ax.tick_params(axis='x', rotation=30)
+
     fig.tight_layout()
     save_plot(fig, save_dir, 'rtt_timeseries.png')
 
@@ -47,16 +62,18 @@ def plot_rtt_distribution(df, save_dir):
     """
     Plots the RTT distribution (KDE) for each target IP.
     """
-    plt.style.use('seaborn-v0_8-whitegrid')
     fig, ax = plt.subplots(figsize=(12, 7))
-    
-    sns.kdeplot(data=df, x='rtt_ms', hue='target_ip', fill=True, common_norm=False, ax=ax)
-    
+
+    sns.kdeplot(
+        data=df, x='rtt_ms', hue='target_ip', fill=True,
+        common_norm=False, alpha=0.25, linewidth=1.5, ax=ax
+    )
+
     ax.set_title('RTT Distribution (KDE)')
     ax.set_xlabel('RTT (ms)')
     ax.set_ylabel('Density')
-    ax.legend(title='Target IP')
-    
+    ax.legend(title='Target IP', frameon=True)
+
     fig.tight_layout()
     save_plot(fig, save_dir, 'rtt_distribution_kde.png')
 
@@ -64,15 +81,18 @@ def plot_rtt_boxplot(df, save_dir):
     """
     Creates a box plot to compare RTT distributions for each target IP.
     """
-    plt.style.use('seaborn-v0_8-whitegrid')
-    fig, ax = plt.subplots(figsize=(10, 8))
-    
-    sns.boxplot(data=df, x='target_ip', y='rtt_ms', hue='probe_type', ax=ax)
-    
+    fig, ax = plt.subplots(figsize=(12, 8))
+
+    sns.boxplot(
+        data=df, x='target_ip', y='rtt_ms', hue='probe_type',
+        ax=ax, linewidth=1.2, fliersize=2
+    )
+
     ax.set_title('RTT Distribution Comparison (Box Plot)')
     ax.set_xlabel('Target IP')
     ax.set_ylabel('RTT (ms)')
-    ax.tick_params(axis='x', rotation=45)
-    
+    ax.tick_params(axis='x', rotation=30)
+    ax.legend(title='Probe Type', frameon=True)
+
     fig.tight_layout()
     save_plot(fig, save_dir, 'rtt_boxplot.png')

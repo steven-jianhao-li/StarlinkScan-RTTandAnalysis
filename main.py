@@ -3,7 +3,7 @@ import sys
 import time
 import shutil
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from multiprocessing import Queue, Process
 import signal
 import logging
@@ -18,6 +18,8 @@ from src.utils.config_loader import load_config
 from src.utils.logger_setup import setup_logger
 from src.collection.icmp_collector import IcmpCollector
 from src.collection.dns_collector import DnsCollector
+from src.collection.rdns_collector import RdnsCollector
+from src.collection.traceroute_collector import TracerouteCollector
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.executors.pool import ThreadPoolExecutor
@@ -182,6 +184,29 @@ def main():
                 replace_existing=True
             )
             logger.info(f"Scheduled DNS probes for {target_ip} every {probe_interval}s.")
+
+        # RDNS & Traceroute are heavier; schedule to run once shortly after start
+        if config.getboolean('RDNS', 'enabled', fallback=False):
+            rdns_collector = RdnsCollector(target_ip, config, output_queue)
+            scheduler.add_job(
+                rdns_collector.run_probe,
+                'date',
+                run_date=datetime.now() + timedelta(seconds=2),
+                id=f'rdns_{target_ip}',
+                replace_existing=True
+            )
+            logger.info(f"Scheduled RDNS probe once for {target_ip}.")
+
+        if config.getboolean('Traceroute', 'enabled', fallback=False):
+            tr_collector = TracerouteCollector(target_ip, config, output_queue)
+            scheduler.add_job(
+                tr_collector.run_probe,
+                'date',
+                run_date=datetime.now() + timedelta(seconds=3),
+                id=f'traceroute_{target_ip}',
+                replace_existing=True
+            )
+            logger.info(f"Scheduled Traceroute probe once for {target_ip}.")
 
     # 9. Start the Scheduler and Wait (bounded by configured duration)
     scheduler.start()
