@@ -74,7 +74,16 @@ def io_writer_process(queue, output_file, log_dir, log_level, log_format):
         file_handler.setFormatter(logging.Formatter(log_format))
         writer_logger.addHandler(file_handler)
 
-    with open(output_file, 'a', encoding='utf-8') as f:
+    # Prepare separate folder for RDNS/Traceroute metadata
+    meta_dir = os.path.join(os.path.dirname(output_file), 'meta')
+    os.makedirs(meta_dir, exist_ok=True)
+
+    rdns_file_path = os.path.join(meta_dir, 'rdns.jsonl')
+    traceroute_file_path = os.path.join(meta_dir, 'traceroute.jsonl')
+
+    with open(output_file, 'a', encoding='utf-8') as f, \
+         open(rdns_file_path, 'a', encoding='utf-8') as frdns, \
+         open(traceroute_file_path, 'a', encoding='utf-8') as ftr:
         while True:
             try:
                 result = queue.get()
@@ -82,8 +91,20 @@ def io_writer_process(queue, output_file, log_dir, log_level, log_format):
                     writer_logger.info("I/O writer process received stop signal. Shutting down.")
                     break
                 # Serialize dict to a JSON string before writing
-                f.write(json.dumps(result) + '\n')
-                f.flush()
+                try:
+                    probe_type = result.get('probe_type')
+                    if probe_type in ('rdns', 'traceroute'):
+                        if probe_type == 'rdns':
+                            frdns.write(json.dumps(result) + '\n')
+                            frdns.flush()
+                        else:
+                            ftr.write(json.dumps(result) + '\n')
+                            ftr.flush()
+                    else:
+                        f.write(json.dumps(result) + '\n')
+                        f.flush()
+                except Exception as e:
+                    writer_logger.error(f"Failed to write result: {e}", exc_info=True)
             except (KeyboardInterrupt, SystemExit):
                 break
             except Exception as e:

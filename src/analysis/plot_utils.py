@@ -35,7 +35,17 @@ def save_plot(fig, save_dir, filename, dpi=300):
     except Exception as e:
         logger.error(f"Failed to save plot {filename}: {e}")
 
-def plot_rtt_timeseries(df, save_dir):
+def _maybe_add_legend(ax, title=None):
+    handles, labels = ax.get_legend_handles_labels()
+    if labels:
+        ax.legend(title=title, ncol=2, frameon=True)
+    else:
+        legend = ax.get_legend()
+        if legend:
+            legend.remove()
+
+
+def plot_rtt_timeseries(df, save_dir, filename_prefix="combined"):
     """
     Plots RTT over time for each target IP and probe type.
     """
@@ -52,13 +62,13 @@ def plot_rtt_timeseries(df, save_dir):
     ax.set_title('RTT Time Series')
     ax.set_xlabel('Timestamp')
     ax.set_ylabel('RTT (ms)')
-    ax.legend(title='Target & Type', ncol=2, frameon=True)
+    _maybe_add_legend(ax, title='Target & Type')
     ax.tick_params(axis='x', rotation=30)
 
     fig.tight_layout()
-    save_plot(fig, save_dir, 'rtt_timeseries.png')
+    save_plot(fig, save_dir, f'{filename_prefix}_rtt_timeseries.png')
 
-def plot_rtt_distribution(df, save_dir):
+def plot_rtt_distribution(df, save_dir, filename_prefix="combined"):
     """
     Plots the RTT distribution (KDE) for each target IP.
     """
@@ -72,12 +82,12 @@ def plot_rtt_distribution(df, save_dir):
     ax.set_title('RTT Distribution (KDE)')
     ax.set_xlabel('RTT (ms)')
     ax.set_ylabel('Density')
-    ax.legend(title='Target IP', frameon=True)
+    _maybe_add_legend(ax, title='Target IP')
 
     fig.tight_layout()
-    save_plot(fig, save_dir, 'rtt_distribution_kde.png')
+    save_plot(fig, save_dir, f'{filename_prefix}_rtt_distribution_kde.png')
 
-def plot_rtt_boxplot(df, save_dir):
+def plot_rtt_boxplot(df, save_dir, filename_prefix="combined"):
     """
     Creates a box plot to compare RTT distributions for each target IP.
     """
@@ -92,7 +102,7 @@ def plot_rtt_boxplot(df, save_dir):
     ax.set_xlabel('Target IP')
     ax.set_ylabel('RTT (ms)')
     ax.tick_params(axis='x', rotation=30)
-    ax.legend(title='Probe Type', frameon=True)
+    _maybe_add_legend(ax, title='Probe Type')
 
     fig.tight_layout()
-    save_plot(fig, save_dir, 'rtt_boxplot.png')
+    save_plot(fig, save_dir, f'{filename_prefix}_rtt_boxplot.png')
