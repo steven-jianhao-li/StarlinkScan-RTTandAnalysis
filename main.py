@@ -11,7 +11,7 @@ import logging
 # --- Path Setup ---
 # This ensures that the script can be run from anywhere and still find its modules and config file.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = SCRIPT_DIR
 sys.path.append(SCRIPT_DIR)
 
 from src.utils.config_loader import load_config
