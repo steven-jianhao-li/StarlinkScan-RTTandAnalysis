@@ -27,6 +27,14 @@ class PairRTTAnalyzer(BaseAnalyzer):
     including statistics, packet loss, and visualizations.
     """
 
+    def __init__(self, task_dir, analyses: list[str] | None = None):
+        super().__init__(task_dir)
+        # 支持的分析项：timeseries,kde,hist,box,ks,summary,loss
+        self.analyses = analyses or ['timeseries','kde','hist','box','ks','summary','loss']
+
+    def _do(self, key: str) -> bool:
+        return key in self.analyses or 'all' in self.analyses
+
     def analyze(self):
         """
         The main analysis pipeline for RTT data.
@@ -40,31 +48,45 @@ class PairRTTAnalyzer(BaseAnalyzer):
             return
 
         # --- Analysis ---
-        self.calculate_packet_loss()
-        self.calculate_descriptive_stats(success_df)
-        self.perform_ks_test(success_df)
+        if self._do('loss'):
+            self.calculate_packet_loss()
+        if self._do('summary'):
+            self.calculate_descriptive_stats(success_df)
+        if self._do('ks'):
+            self.perform_ks_test(success_df)
 
         # --- Visualization ---
         plot_dir = os.path.join(self.task_dir, 'plots')
         # Combined
-        plot_rtt_timeseries(success_df, plot_dir, filename_prefix='combined')
-        plot_rtt_distribution(success_df, plot_dir, filename_prefix='combined')
-        # Add histogram view (with and without KDE)
-        plot_rtt_histogram(success_df, plot_dir, filename_prefix='combined', bins=50, kde=False)
-        plot_rtt_boxplot(success_df, plot_dir, filename_prefix='combined')
+        if self._do('timeseries'):
+            plot_rtt_timeseries(success_df, plot_dir, filename_prefix='combined')
+        if self._do('kde'):
+            plot_rtt_distribution(success_df, plot_dir, filename_prefix='combined')
+        if self._do('hist'):
+            plot_rtt_histogram(success_df, plot_dir, filename_prefix='combined', bins=50, kde=False)
+        if self._do('box'):
+            plot_rtt_boxplot(success_df, plot_dir, filename_prefix='combined')
         # Per-type
         icmp_df = success_df[success_df['probe_type'] == 'icmp']
         if not icmp_df.empty:
-            plot_rtt_timeseries(icmp_df, plot_dir, filename_prefix='icmp')
-            plot_rtt_distribution(icmp_df, plot_dir, filename_prefix='icmp')
-            plot_rtt_histogram(icmp_df, plot_dir, filename_prefix='icmp', bins=50, kde=False)
-            plot_rtt_boxplot(icmp_df, plot_dir, filename_prefix='icmp')
+            if self._do('timeseries'):
+                plot_rtt_timeseries(icmp_df, plot_dir, filename_prefix='icmp')
+            if self._do('kde'):
+                plot_rtt_distribution(icmp_df, plot_dir, filename_prefix='icmp')
+            if self._do('hist'):
+                plot_rtt_histogram(icmp_df, plot_dir, filename_prefix='icmp', bins=50, kde=False)
+            if self._do('box'):
+                plot_rtt_boxplot(icmp_df, plot_dir, filename_prefix='icmp')
         dns_df = success_df[success_df['probe_type'] == 'dns']
         if not dns_df.empty:
-            plot_rtt_timeseries(dns_df, plot_dir, filename_prefix='dns')
-            plot_rtt_distribution(dns_df, plot_dir, filename_prefix='dns')
-            plot_rtt_histogram(dns_df, plot_dir, filename_prefix='dns', bins=50, kde=False)
-            plot_rtt_boxplot(dns_df, plot_dir, filename_prefix='dns')
+            if self._do('timeseries'):
+                plot_rtt_timeseries(dns_df, plot_dir, filename_prefix='dns')
+            if self._do('kde'):
+                plot_rtt_distribution(dns_df, plot_dir, filename_prefix='dns')
+            if self._do('hist'):
+                plot_rtt_histogram(dns_df, plot_dir, filename_prefix='dns', bins=50, kde=False)
+            if self._do('box'):
+                plot_rtt_boxplot(dns_df, plot_dir, filename_prefix='dns')
 
         # --- Export analysis artifacts ---
         pkt_loss_records = []

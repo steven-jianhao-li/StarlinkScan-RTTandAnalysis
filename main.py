@@ -448,30 +448,58 @@ def run_mass_scan():
     io_ground.start()
     io_sat.start()
 
-    # 5. Run probes (ICMP-only by default)
-    probes_per_ip = config.getint('MassScan', 'probes_per_ip', fallback=1)
-    timeout_seconds = config.getint('Scheduler', 'run_duration_seconds', fallback=300)
-    start_ts = time.time()
+    # 5. Schedule probes with interval similar to pair mode
+    executors = {
+        'default': ThreadPoolExecutor(config.getint('General', 'worker_threads', fallback=10))
+    }
+    job_defaults = {
+        'coalesce': True,
+        'max_instances': 1,
+        'misfire_grace_time': 10
+    }
+    scheduler = BackgroundScheduler(executors=executors, job_defaults=job_defaults)
+
+    probe_interval = config.getint('Scheduler', 'probe_interval_seconds', fallback=1)
+
+    # Schedule ICMP and optionally DNS for each set
+    for ip in ground_targets:
+        if config.getboolean('ICMP', 'enabled', fallback=True):
+            scheduler.add_job(IcmpCollector(ip, config, ground_queue).run_probe, 'interval', seconds=probe_interval, id=f'mass_icmp_ground_{ip}', replace_existing=True)
+        if config.getboolean('DNS', 'enabled', fallback=False):
+            scheduler.add_job(DnsCollector(ip, config, ground_queue).run_probe, 'interval', seconds=probe_interval, id=f'mass_dns_ground_{ip}', replace_existing=True)
+
+    for ip in sat_targets:
+        if config.getboolean('ICMP', 'enabled', fallback=True):
+            scheduler.add_job(IcmpCollector(ip, config, sat_queue).run_probe, 'interval', seconds=probe_interval, id=f'mass_icmp_sat_{ip}', replace_existing=True)
+        if config.getboolean('DNS', 'enabled', fallback=False):
+            scheduler.add_job(DnsCollector(ip, config, sat_queue).run_probe, 'interval', seconds=probe_interval, id=f'mass_dns_sat_{ip}', replace_existing=True)
+
+    scheduler.start()
+    logger.info(f"Mass scheduler started. Interval={probe_interval}s")
+
+    run_duration = config.getint('Scheduler', 'run_duration_seconds', fallback=300)
+    logger.info(f"Mass probing will run for {run_duration} seconds as configured.")
+    print(f"Mass probing started. Will run for {run_duration} seconds...")
+
+    def _handle_term(signum, frame):
+        raise KeyboardInterrupt()
+
     try:
-        # ground first
-        for ip in ground_targets:
-            collector = IcmpCollector(ip, config, ground_queue)
-            for _ in range(max(1, probes_per_ip)):
-                collector.run_probe()
-            if time.time() - start_ts > timeout_seconds:
-                logger.warning("Mass scan time budget exceeded; stopping early.")
-                break
-        # satellite
-        for ip in sat_targets:
-            collector = IcmpCollector(ip, config, sat_queue)
-            for _ in range(max(1, probes_per_ip)):
-                collector.run_probe()
-            if time.time() - start_ts > timeout_seconds:
-                logger.warning("Mass scan time budget exceeded; stopping early.")
-                break
+        signal.signal(signal.SIGTERM, _handle_term)
+    except Exception:
+        pass
+
+    try:
+        end_time = time.time() + run_duration
+        while time.time() < end_time:
+            time.sleep(1)
     except (KeyboardInterrupt, SystemExit):
         logger.info("Mass scan interrupted by user.")
     finally:
+        try:
+            scheduler.shutdown()
+        except Exception:
+            pass
         # stop writers
         for q in (ground_queue, sat_queue):
             try:
@@ -488,19 +516,86 @@ def run_mass_scan():
 
 def prompt_mode_if_needed(args_mode: str | None) -> str:
     """Return chosen mode either from args or interactive prompt."""
-    choices = ['pair', 'mass-scan', 'analyze-pair', 'analyze-mass']
+    choices = ['pair', 'mass-scan', 'analyze-pair', 'analyze-mass', 'analyze-pair-from-mass']
     if args_mode in choices:
         return args_mode
-    print("请选择运行模式: \n  1) pair (两点扫描+自动分析)\n  2) mass-scan (大规模扫描，仅扫描)\n  3) analyze-pair (分析两点结果)\n  4) analyze-mass (分析大规模结果)")
-    sel = input("输入序号或名称 [1-4]: ").strip()
-    mapping = {'1': 'pair', '2': 'mass-scan', '3': 'analyze-pair', '4': 'analyze-mass'}
+    print("请选择运行模式: \n  1) pair (两点扫描+自动分析)\n  2) mass-scan (大规模扫描，定时采样)\n  3) analyze-pair (分析两点结果)\n  4) analyze-mass (分析大规模结果)\n  5) analyze-pair-from-mass (从大规模结果中选两IP做两点分析)")
+    sel = input("输入序号或名称 [1-5]: ").strip()
+    mapping = {'1': 'pair', '2': 'mass-scan', '3': 'analyze-pair', '4': 'analyze-mass', '5': 'analyze-pair-from-mass'}
     return mapping.get(sel, sel if sel in choices else 'pair')
+
+
+def _parse_analyses_arg(input_str: str | None, defaults: list[str]) -> list[str]:
+    if not input_str:
+        return defaults
+    items = [x.strip() for x in input_str.split(',') if x.strip()]
+    return items or defaults
+
+
+def _list_mass_ips(result_dir: str, label: str) -> list[str]:
+    path = os.path.join(result_dir, label)
+    if not os.path.isdir(path):
+        return []
+    ips = []
+    for name in os.listdir(path):
+        if name.endswith('.csv'):
+            ips.append(name[:-4])
+    return sorted(ips)
+
+
+def _choose_ip_interactively(ips: list[str], label: str) -> str:
+    if not ips:
+        return ''
+    print(f"可选 {label} IP 数量: {len(ips)}")
+    preview = ips[:10]
+    for i, ip in enumerate(preview, 1):
+        print(f"  {i}. {ip}")
+    if len(ips) > 10:
+        print("  ... (其余省略)")
+    sel = input(f"请选择 {label} IP（输入序号或直接输入IP）: ").strip()
+    if sel.isdigit():
+        idx = int(sel)
+        if 1 <= idx <= len(preview):
+            return preview[idx - 1]
+    return sel
+
+
+def _build_pair_from_mass_dataset(result_dir: str, ground_ip: str, sat_ip: str, probe_type: str) -> str:
+    """Create a temporary pair-style dataset (raw_data.jsonl) from mass CSVs and return its directory."""
+    import csv, json as _json
+    timestamp = datetime.now().strftime('%Y%m%dT%H%M%S')
+    out_dir = os.path.join(result_dir, f'pair_from_mass_{probe_type}_{ground_ip}_vs_{sat_ip}_{timestamp}')
+    os.makedirs(out_dir, exist_ok=True)
+    out_file = os.path.join(out_dir, 'raw_data.jsonl')
+
+    def emit_from_csv(csv_path: str):
+        if not os.path.isfile(csv_path):
+            return
+        with open(csv_path, 'r', encoding='utf-8') as f, open(out_file, 'a', encoding='utf-8') as w:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if probe_type and row.get('probe_type') != probe_type:
+                    continue
+                rec = {
+                    'timestamp': row.get('timestamp'),
+                    'target_ip': row.get('target_ip'),
+                    'probe_type': row.get('probe_type'),
+                    'rtt_ms': float(row['rtt_ms']) if row.get('rtt_ms') not in (None, '',) else None,
+                    'status': row.get('status'),
+                    'metadata': {}
+                }
+                w.write(_json.dumps(rec) + '\n')
+
+    emit_from_csv(os.path.join(result_dir, 'ground', f'{ground_ip}.csv'))
+    emit_from_csv(os.path.join(result_dir, 'satellite', f'{sat_ip}.csv'))
+    return out_dir
 
 
 def main():
     parser = argparse.ArgumentParser(description='Starlink RTT Scanner/Analyzer')
-    parser.add_argument('--mode', choices=['pair', 'mass-scan', 'analyze-pair', 'analyze-mass'], help='运行模式')
+    parser.add_argument('--mode', choices=['pair', 'mass-scan', 'analyze-pair', 'analyze-mass', 'analyze-pair-from-mass'], help='运行模式')
     parser.add_argument('--input', help='当使用 analyze-* 模式时，指定待分析的目录')
+    parser.add_argument('--analyses', help='逗号分隔的分析项，例如: timeseries,kde,hist,box,ks,summary,loss,cdf,violin,topn')
     args = parser.parse_args()
 
     mode = prompt_mode_if_needed(args.mode)
@@ -517,7 +612,8 @@ def main():
         # setup simple logger
         setup_logger(task_dir, 'INFO', '%(asctime)s - %(message)s')
         from src.analysis.pair_rtt_analyzer import PairRTTAnalyzer
-        analyzer = PairRTTAnalyzer(task_dir)
+        selected = _parse_analyses_arg(args.analyses, ['timeseries','kde','hist','box','ks','summary','loss'])
+        analyzer = PairRTTAnalyzer(task_dir, analyses=selected)
         analyzer.run()
     elif mode == 'analyze-mass':
         # 分析大规模结果
@@ -527,7 +623,26 @@ def main():
             sys.exit(2)
         setup_logger(result_dir, 'INFO', '%(asctime)s - %(message)s')
         from src.analysis.mass_rtt_analyzer import MassRTTAnalyzer
-        analyzer = MassRTTAnalyzer(result_dir)
+        selected = _parse_analyses_arg(args.analyses, ['summary_by_ip','summary_by_label','mean_hist','mean_vs_loss','kde_by_label'])
+        analyzer = MassRTTAnalyzer(result_dir, analyses=selected)
+        analyzer.run()
+    elif mode == 'analyze-pair-from-mass':
+        # 从大规模结果中选两IP做两点分析
+        result_dir = args.input or input('请输入大规模扫描结果目录（data/output/mass/<timestamp>）: ').strip()
+        if not os.path.isdir(result_dir):
+            print(f"目录不存在: {result_dir}", file=sys.stderr)
+            sys.exit(2)
+        setup_logger(result_dir, 'INFO', '%(asctime)s - %(message)s')
+        g_ips = _list_mass_ips(result_dir, 'ground')
+        s_ips = _list_mass_ips(result_dir, 'satellite')
+        g_sel = _choose_ip_interactively(g_ips, 'ground')
+        s_sel = _choose_ip_interactively(s_ips, 'satellite')
+        # 选择探测类型（从已有数据考虑，默认 icmp）
+        probe = input('请选择探测类型（icmp/dns，默认 icmp）: ').strip().lower() or 'icmp'
+        tmp_pair_dir = _build_pair_from_mass_dataset(result_dir, g_sel, s_sel, probe)
+        from src.analysis.pair_rtt_analyzer import PairRTTAnalyzer
+        selected = _parse_analyses_arg(args.analyses, ['timeseries','kde','hist','box','ks','summary','loss'])
+        analyzer = PairRTTAnalyzer(tmp_pair_dir, analyses=selected)
         analyzer.run()
     else:
         print(f"未知模式: {mode}", file=sys.stderr)

@@ -6,9 +6,10 @@
 
 - main.py：统一入口，提供模式选择与流程编排
   - pair：按配置文件对目标进行周期性 ICMP/DNS 探测，生成 JSONL；自动完成两点分析
-  - mass-scan：读取带有地面/卫星分组的目标清单，按 IP 输出 CSV（ground 与 satellite 分目录存放）
+  - mass-scan：读取带有地面/卫星分组的目标清单，按配置每 x 秒探测一次，持续 y 秒；按 IP 输出 CSV（ground 与 satellite 分目录存放）
   - analyze-pair：对 pair 模式的某次任务目录进行分析
   - analyze-mass：对 mass 扫描结果目录进行分析
+  - analyze-pair-from-mass：从 mass 结果中选择“地面 IP + 卫星 IP + 探测类型”，构造两点数据并运行两点分析
 - src/collection/*：探测器
   - IcmpCollector：使用 ping3 采集 ICMP RTT
   - DnsCollector：DNS 查询 RTT
@@ -42,7 +43,7 @@
 - 输出：`data/output/mass/<timestamp>/`
   - `ground/` 与 `satellite/` 目录中各自按 IP 命名的 CSV：
     `timestamp,target_ip,probe_type,rtt_ms,status`
-  - 分析输出：`summary_by_ip.csv`、`summary_by_label.csv`、`kde_by_label.png` 等
+  - 分析输出：`summary_by_ip.csv`、`summary_by_label.csv`、`kde_by_label.png`、`cdf_by_label.png`、`box_by_label.png`、`violin_by_label.png`、`mean_rtt_across_ips.png`、`mean_vs_loss_scatter.png`、以及 TopN CSV 等
 
 ## 设计要点
 
@@ -130,8 +131,22 @@
   # 仅分析两点结果
   python main.py --mode analyze-pair --input data/output/<timestamp>
 
-  # 分析大规模结果
+  # 分析大规模结果（可选择分析项）
   python main.py --mode analyze-mass --input data/output/mass/<timestamp>
+
+  # 从大规模结果中挑选两 IP 运行“两点分析”（会显示 IP 列表，超过 10 个以省略号提示）
+  python main.py --mode analyze-pair-from-mass --input data/output/mass/<timestamp>
   ```
 
 如需调整参数，请编辑 `configs/default_config.ini`。
+
+### 命令行选择分析项（多选）
+- `--analyses` 逗号分隔：
+  - 两点分析（pair / analyze-pair / analyze-pair-from-mass）：
+    `timeseries,kde,hist,box,ks,summary,loss`
+  - 大规模分析（analyze-mass）：
+    `summary_by_ip,summary_by_label,mean_hist,mean_vs_loss,kde_by_label,cdf_by_label,box_violin_by_label,topn`
+  - 示例：
+    ```bash
+    python main.py --mode analyze-mass --input data/output/mass/<timestamp> --analyses summary_by_ip,kde_by_label,cdf_by_label,topn
+    ```
