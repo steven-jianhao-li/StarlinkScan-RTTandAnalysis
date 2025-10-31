@@ -3,6 +3,7 @@ import sys
 import time
 import shutil
 import json
+import argparse
 from datetime import datetime, timedelta
 from multiprocessing import Queue, Process
 import signal
@@ -27,14 +28,17 @@ from apscheduler.executors.pool import ThreadPoolExecutor
 # --- Global Variables ---
 config = None
 logger = None
-output_queue = None  # Will be created in main() to avoid Windows spawn issues
+output_queue = None  # Will be created in workflows to avoid Windows spawn issues
 
 def get_task_id(task_name, targets):
-    """Generates a unique ID for the current task."""
+    """Generates a unique ID for the current task.
+
+    NOTE: To keep directories tidy when many targets are used, we now only
+    include the timestamp in the task id (no IPs/targets).
+    """
     timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
-    # Use a sanitized version of the first target for brevity
-    first_target = targets.replace('.', '_') if targets else 'no_targets'
-    return f"{task_name}_{first_target}_{timestamp}"
+    # Only keep time component to avoid very long directory names
+    return f"{timestamp}"
 
 def load_targets(target_file):
     """Loads target IPs from the specified file."""
@@ -112,7 +116,118 @@ def io_writer_process(queue, output_file, log_dir, log_level, log_format):
     writer_logger.info("I/O writer process finished.")
 
 
-def main():
+def io_writer_process_mass(queue, output_dir, log_dir, log_level, log_format):
+    """
+    I/O writer for mass-scan mode: writes one CSV per IP under output_dir.
+
+    CSV schema: timestamp,target_ip,probe_type,rtt_ms,status
+    """
+    writer_logger = setup_logger(log_dir, log_level, log_format)
+    writer_logger.info(f"Mass I/O writer started. Output dir: {output_dir}")
+
+    # Rotate writer's own log to separate file
+    handler_index = -1
+    for i, handler in enumerate(writer_logger.handlers):
+        if isinstance(handler, logging.FileHandler):
+            handler_index = i
+            break
+    if handler_index != -1:
+        writer_logger.handlers[handler_index].close()
+        writer_logger.removeHandler(writer_logger.handlers[handler_index])
+        writer_log_file = os.path.join(log_dir, 'io_writer_mass.log')
+        file_handler = logging.FileHandler(writer_log_file)
+        file_handler.setFormatter(logging.Formatter(log_format))
+        writer_logger.addHandler(file_handler)
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Lazy-open file handles per IP with header
+    handles = {}
+
+    def _get_handle(ip):
+        path = os.path.join(output_dir, f"{ip}.csv")
+        if ip not in handles:
+            f = open(path, 'a', encoding='utf-8')
+            if os.stat(path).st_size == 0:
+                f.write('timestamp,target_ip,probe_type,rtt_ms,status\n')
+                f.flush()
+            handles[ip] = f
+        return handles[ip]
+
+    try:
+        while True:
+            try:
+                item = queue.get()
+                if item is None:
+                    writer_logger.info("Mass I/O writer received stop signal.")
+                    break
+                ip = item.get('target_ip', 'unknown')
+                f = _get_handle(ip)
+                # Prepare CSV row (metadata omitted)
+                ts = item.get('timestamp', '')
+                probe_type = item.get('probe_type', '')
+                rtt = item.get('rtt_ms')
+                status = item.get('status', '')
+                rtt_str = '' if rtt is None else f"{float(rtt):.6f}"
+                line = f"{ts},{ip},{probe_type},{rtt_str},{status}\n"
+                f.write(line)
+                f.flush()
+            except (KeyboardInterrupt, SystemExit):
+                break
+            except Exception as e:
+                writer_logger.error(f"Mass I/O writer error: {e}", exc_info=True)
+    finally:
+        for f in handles.values():
+            try:
+                f.close()
+            except Exception:
+                pass
+        writer_logger.info("Mass I/O writer finished.")
+
+
+def _parse_mass_targets(file_path: str):
+    """Parse mass target file with [ground] and [satellite] sections.
+
+    File format example:
+
+    [ground]
+    1.1.1.1
+    8.8.8.8
+
+    [satellite]
+    203.0.113.1
+
+    Lines starting with '#' are ignored. Section headers are case-insensitive.
+    """
+    ground, satellite = [], []
+    current = None
+    if not os.path.exists(file_path):
+        print(f"ERROR: Mass target file not found: {file_path}", file=sys.stderr)
+        return ground, satellite
+    with open(file_path, 'r', encoding='utf-8') as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith('#'):
+                continue
+            if line.startswith('[') and line.endswith(']'):
+                sec = line[1:-1].strip().lower()
+                if sec in ('ground', 'satellite'):
+                    current = sec
+                else:
+                    current = None
+                continue
+            if current == 'ground':
+                ground.append(line)
+            elif current == 'satellite':
+                satellite.append(line)
+            else:
+                # default to ground if no section specified yet
+                ground.append(line)
+    return ground, satellite
+
+
+def run_pair_workflow():
+    """Original scan+analyze workflow for two-point comparison."""
     global config, logger, output_queue
 
     # 1. Load Configuration
@@ -132,7 +247,7 @@ def main():
 
     # 3. Setup Task Directory and Logging
     task_name = config.get('General', 'task_name')
-    # Convert list of targets to a string for the task ID
+    # Directory only contains timestamp now
     task_id = get_task_id(task_name, "_".join(targets))
     task_dir = os.path.join(PROJECT_ROOT, 'data', 'output', task_id)
     os.makedirs(task_dir, exist_ok=True)
@@ -274,13 +389,149 @@ def main():
 
     # 10. Run Analysis automatically
     try:
-        from src.analysis.rtt_analyzer import RTTAnalyzer
+        from src.analysis.pair_rtt_analyzer import PairRTTAnalyzer
         # Reuse the same log directory; analyzer will log into task dir
-        analyzer = RTTAnalyzer(task_dir)
+        analyzer = PairRTTAnalyzer(task_dir)
         analyzer.run()
         logger.info("Automated analysis finished. Outputs saved under 'plots/'.")
     except Exception as e:
         logger.error(f"Automated analysis failed: {e}", exc_info=True)
+
+
+def run_mass_scan():
+    """Mass scan mode: ping many IPs once (or a few times) and store per-IP CSVs."""
+    global config, logger, output_queue
+
+    # 1. Load Configuration
+    try:
+        config_path = os.path.join(PROJECT_ROOT, 'configs', 'default_config.ini')
+        config = load_config(config_path)
+    except FileNotFoundError as e:
+        print(f"FATAL: Configuration file not found. {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # 2. Load mass targets
+    mass_target_file_rel = config.get('General', 'mass_target_file', fallback='data/input/mass_targets.txt')
+    target_file_path = os.path.join(PROJECT_ROOT, mass_target_file_rel)
+    ground_targets, sat_targets = _parse_mass_targets(target_file_path)
+    if not ground_targets and not sat_targets:
+        print("FATAL: No mass targets to probe (ground/satellite empty). Exiting.", file=sys.stderr)
+        sys.exit(1)
+
+    # 3. Setup directories and logging
+    timestamp = datetime.now().strftime('%Y%m%dT%H%M%S')
+    # Place outputs under data/output/mass/<timestamp>/
+    result_root = os.path.join(PROJECT_ROOT, 'data', 'output', 'mass', timestamp)
+    os.makedirs(result_root, exist_ok=True)
+    ground_dir = os.path.join(result_root, 'ground')
+    satellite_dir = os.path.join(result_root, 'satellite')
+    os.makedirs(ground_dir, exist_ok=True)
+    os.makedirs(satellite_dir, exist_ok=True)
+
+    log_level = config.get('Logging', 'level', fallback='INFO')
+    log_format = config.get('Logging', 'format', raw=True)
+    logger = setup_logger(result_root, log_level, log_format)
+    logger.info(f"Mass scan starting. Ground: {len(ground_targets)}, Satellite: {len(sat_targets)}")
+
+    # Snapshot config and target list
+    try:
+        shutil.copy(os.path.join(PROJECT_ROOT, 'configs', 'default_config.ini'), os.path.join(result_root, 'config.ini'))
+        shutil.copy(target_file_path, os.path.join(result_root, 'targets.txt'))
+    except Exception as e:
+        logger.warning(f"Failed to snapshot inputs: {e}")
+
+    # 4. Start mass writer processes (ground & satellite)
+    ground_queue = Queue()
+    sat_queue = Queue()
+    io_ground = Process(target=io_writer_process_mass, args=(ground_queue, ground_dir, result_root, log_level, log_format))
+    io_sat = Process(target=io_writer_process_mass, args=(sat_queue, satellite_dir, result_root, log_level, log_format))
+    io_ground.start()
+    io_sat.start()
+
+    # 5. Run probes (ICMP-only by default)
+    probes_per_ip = config.getint('MassScan', 'probes_per_ip', fallback=1)
+    timeout_seconds = config.getint('Scheduler', 'run_duration_seconds', fallback=300)
+    start_ts = time.time()
+    try:
+        # ground first
+        for ip in ground_targets:
+            collector = IcmpCollector(ip, config, ground_queue)
+            for _ in range(max(1, probes_per_ip)):
+                collector.run_probe()
+            if time.time() - start_ts > timeout_seconds:
+                logger.warning("Mass scan time budget exceeded; stopping early.")
+                break
+        # satellite
+        for ip in sat_targets:
+            collector = IcmpCollector(ip, config, sat_queue)
+            for _ in range(max(1, probes_per_ip)):
+                collector.run_probe()
+            if time.time() - start_ts > timeout_seconds:
+                logger.warning("Mass scan time budget exceeded; stopping early.")
+                break
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Mass scan interrupted by user.")
+    finally:
+        # stop writers
+        for q in (ground_queue, sat_queue):
+            try:
+                q.put(None)
+            except Exception:
+                pass
+        for p in (io_ground, io_sat):
+            p.join(timeout=5)
+        for p in (io_ground, io_sat):
+            if p.is_alive():
+                p.terminate()
+        logger.info("Mass scan finished.")
+
+
+def prompt_mode_if_needed(args_mode: str | None) -> str:
+    """Return chosen mode either from args or interactive prompt."""
+    choices = ['pair', 'mass-scan', 'analyze-pair', 'analyze-mass']
+    if args_mode in choices:
+        return args_mode
+    print("请选择运行模式: \n  1) pair (两点扫描+自动分析)\n  2) mass-scan (大规模扫描，仅扫描)\n  3) analyze-pair (分析两点结果)\n  4) analyze-mass (分析大规模结果)")
+    sel = input("输入序号或名称 [1-4]: ").strip()
+    mapping = {'1': 'pair', '2': 'mass-scan', '3': 'analyze-pair', '4': 'analyze-mass'}
+    return mapping.get(sel, sel if sel in choices else 'pair')
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Starlink RTT Scanner/Analyzer')
+    parser.add_argument('--mode', choices=['pair', 'mass-scan', 'analyze-pair', 'analyze-mass'], help='运行模式')
+    parser.add_argument('--input', help='当使用 analyze-* 模式时，指定待分析的目录')
+    args = parser.parse_args()
+
+    mode = prompt_mode_if_needed(args.mode)
+    if mode == 'pair':
+        run_pair_workflow()
+    elif mode == 'mass-scan':
+        run_mass_scan()
+    elif mode == 'analyze-pair':
+        # 分析两点结果
+        task_dir = args.input or input('请输入两点结果目录路径: ').strip()
+        if not os.path.isdir(task_dir):
+            print(f"目录不存在: {task_dir}", file=sys.stderr)
+            sys.exit(2)
+        # setup simple logger
+        setup_logger(task_dir, 'INFO', '%(asctime)s - %(message)s')
+        from src.analysis.pair_rtt_analyzer import PairRTTAnalyzer
+        analyzer = PairRTTAnalyzer(task_dir)
+        analyzer.run()
+    elif mode == 'analyze-mass':
+        # 分析大规模结果
+        result_dir = args.input or input('请输入大规模扫描结果目录（包含一堆按IP命名的CSV）: ').strip()
+        if not os.path.isdir(result_dir):
+            print(f"目录不存在: {result_dir}", file=sys.stderr)
+            sys.exit(2)
+        setup_logger(result_dir, 'INFO', '%(asctime)s - %(message)s')
+        from src.analysis.mass_rtt_analyzer import MassRTTAnalyzer
+        analyzer = MassRTTAnalyzer(result_dir)
+        analyzer.run()
+    else:
+        print(f"未知模式: {mode}", file=sys.stderr)
+        sys.exit(2)
 
 
 if __name__ == '__main__':

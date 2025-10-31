@@ -1,0 +1,139 @@
+import os
+import sys
+import logging
+import pandas as pd
+import glob
+from pathlib import Path
+
+from src.analysis.plot_utils import (
+    save_plot,
+    _maybe_add_legend,
+)
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+logger = logging.getLogger("SatelliteDetector.MassRTTAnalyzer")
+
+
+class MassRTTAnalyzer:
+    """
+    Analyze mass-scan results where each IP has a CSV file of individual probes.
+
+    Expected input directory structure:
+    - <root>/
+        <ip1>.csv
+        <ip2>.csv
+        ...
+
+    CSV schema: timestamp,target_ip,probe_type,rtt_ms,status
+    """
+
+    def __init__(self, result_dir: str):
+        self.result_dir = result_dir
+
+    def _load_all(self) -> pd.DataFrame:
+        # Allow both flat and labeled structure (ground/satellite subfolders)
+        p = Path(self.result_dir)
+        files = [str(fp) for fp in p.rglob('*.csv') if fp.is_file()]
+        if not files:
+            logger.warning("No CSV files found for mass analysis.")
+            return pd.DataFrame()
+        dfs = []
+        for f in files:
+            try:
+                df = pd.read_csv(f)
+                # Add label by parent folder name if it's 'ground' or 'satellite'
+                parent = Path(f).parent.name.lower()
+                if parent in ('ground', 'satellite'):
+                    df['label'] = parent
+                dfs.append(df)
+            except Exception as e:
+                logger.warning(f"Skip file {f}: {e}")
+        if not dfs:
+            return pd.DataFrame()
+        df_all = pd.concat(dfs, ignore_index=True)
+        # ensure data types
+        df_all['rtt_ms'] = pd.to_numeric(df_all['rtt_ms'], errors='coerce')
+        try:
+            df_all['timestamp'] = pd.to_datetime(df_all['timestamp'])
+        except Exception:
+            pass
+        return df_all
+
+    def analyze(self):
+        df = self._load_all()
+        if df.empty:
+            logger.warning('MassRTTAnalyzer: empty dataset.')
+            return
+
+        # success-only RTTs
+        ok = df[(df['status'] == 'success') & (df['rtt_ms'].notnull())].copy()
+
+        # Aggregate per IP
+        agg = ok.groupby('target_ip')['rtt_ms'].agg(
+            count='count', mean='mean', median='median', p95=lambda s: s.quantile(0.95),
+            min='min', max='max'
+        )
+
+        # Packet loss per IP
+        total = df.groupby('target_ip')['status'].size().rename('total')
+        non_ok = df[df['status'] != 'success'].groupby('target_ip')['status'].size().rename('non_success')
+        summary = agg.join(total, how='outer').join(non_ok, how='left').fillna({'non_success': 0})
+        summary['loss_pct'] = (summary['non_success'] / summary['total']).fillna(0) * 100
+        summary = summary.sort_values(by='mean', ascending=True)
+
+        out_csv = os.path.join(self.result_dir, 'summary_by_ip.csv')
+        summary.to_csv(out_csv)
+        logger.info(f"Saved summary: {out_csv}")
+
+        # Plot distribution of mean RTT across IPs
+        fig, ax = plt.subplots(figsize=(12, 7))
+        sns.histplot(summary['mean'].dropna(), bins=40, stat='density', kde=True, ax=ax)
+        ax.set_title('Distribution of mean RTT across IPs')
+        ax.set_xlabel('Mean RTT (ms)')
+        ax.set_ylabel('Density')
+        fig.tight_layout()
+        save_plot(fig, self.result_dir, 'mean_rtt_across_ips.png')
+
+        # Scatter: mean RTT vs packet loss
+        fig, ax = plt.subplots(figsize=(12, 7))
+        ax.scatter(summary['mean'], summary['loss_pct'], alpha=0.7)
+        ax.set_title('Mean RTT vs Packet Loss per IP')
+        ax.set_xlabel('Mean RTT (ms)')
+        ax.set_ylabel('Packet Loss (%)')
+        fig.tight_layout()
+        save_plot(fig, self.result_dir, 'mean_vs_loss_scatter.png')
+
+        # Optional: if labels exist, compare distributions per label
+        if 'label' in ok.columns:
+            # per-label summary
+            label_summary = ok.groupby('label')['rtt_ms'].agg(
+                count='count', mean='mean', median='median', p95=lambda s: s.quantile(0.95)
+            )
+            label_summary.to_csv(os.path.join(self.result_dir, 'summary_by_label.csv'))
+
+            # KDE per label
+            fig, ax = plt.subplots(figsize=(12, 7))
+            sns.kdeplot(data=ok, x='rtt_ms', hue='label', common_norm=False, fill=True, clip=(0, None), cut=0, ax=ax)
+            ax.set_title('RTT Distribution by Label (KDE)')
+            ax.set_xlabel('RTT (ms)')
+            ax.set_ylabel('Density')
+            ax.set_xlim(left=0)
+            fig.tight_layout()
+            save_plot(fig, self.result_dir, 'kde_by_label.png')
+
+    def run(self):
+        self.analyze()
+
+
+if __name__ == '__main__':
+    # Standalone run: python src/analysis/mass_rtt_analyzer.py <result_dir>
+    if len(sys.argv) != 2:
+        print('Usage: python mass_rtt_analyzer.py <result_dir>')
+        sys.exit(1)
+    rd = sys.argv[1]
+    if not os.path.isdir(rd):
+        print(f'Directory not found: {rd}')
+        sys.exit(1)
+    logging.basicConfig(level=logging.INFO)
+    MassRTTAnalyzer(rd).run()
