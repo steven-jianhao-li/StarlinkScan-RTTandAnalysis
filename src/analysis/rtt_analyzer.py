@@ -14,6 +14,7 @@ from src.analysis.plot_utils import (
     plot_rtt_timeseries,
     plot_rtt_distribution,
     plot_rtt_boxplot,
+    plot_rtt_histogram,
 )
 from src.utils.logger_setup import setup_logger
 
@@ -47,18 +48,22 @@ class RTTAnalyzer(BaseAnalyzer):
         # Combined
         plot_rtt_timeseries(success_df, plot_dir, filename_prefix='combined')
         plot_rtt_distribution(success_df, plot_dir, filename_prefix='combined')
+        # Add histogram view
+        plot_rtt_histogram(success_df, plot_dir, filename_prefix='combined', bins=50, kde=False)
         plot_rtt_boxplot(success_df, plot_dir, filename_prefix='combined')
         # Per-type
         icmp_df = success_df[success_df['probe_type'] == 'icmp']
         if not icmp_df.empty:
             plot_rtt_timeseries(icmp_df, plot_dir, filename_prefix='icmp')
             plot_rtt_distribution(icmp_df, plot_dir, filename_prefix='icmp')
+            plot_rtt_histogram(icmp_df, plot_dir, filename_prefix='icmp', bins=50, kde=False)
             # For per-type boxplot, we can drop hue to avoid redundant legend
             plot_rtt_boxplot(icmp_df, plot_dir, filename_prefix='icmp')
         dns_df = success_df[success_df['probe_type'] == 'dns']
         if not dns_df.empty:
             plot_rtt_timeseries(dns_df, plot_dir, filename_prefix='dns')
             plot_rtt_distribution(dns_df, plot_dir, filename_prefix='dns')
+            plot_rtt_histogram(dns_df, plot_dir, filename_prefix='dns', bins=50, kde=False)
             plot_rtt_boxplot(dns_df, plot_dir, filename_prefix='dns')
 
         # --- Export analysis artifacts for clear separation ---

@@ -45,6 +45,24 @@ def _maybe_add_legend(ax, title=None):
             legend.remove()
 
 
+def _ensure_non_negative_rtt(df, col='rtt_ms'):
+    """
+    Return a copy of df where RTT values are non-negative.
+    If negative values exist, they will be clipped to 0 for visualization.
+    """
+    if df[col].min() < 0:
+        df = df.copy()
+        df[col] = df[col].clip(lower=0)
+    return df
+
+
+def _auto_hue(df):
+    """Choose hue automatically: prefer probe_type when it has >1 unique values, else target_ip."""
+    if 'probe_type' in df.columns and df['probe_type'].nunique() > 1:
+        return 'probe_type', 'Probe Type'
+    return 'target_ip', 'Target IP'
+
+
 def plot_rtt_timeseries(df, save_dir, filename_prefix="combined"):
     """
     Plots RTT over time for each target IP and probe type.
@@ -68,21 +86,41 @@ def plot_rtt_timeseries(df, save_dir, filename_prefix="combined"):
     fig.tight_layout()
     save_plot(fig, save_dir, f'{filename_prefix}_rtt_timeseries.png')
 
-def plot_rtt_distribution(df, save_dir, filename_prefix="combined"):
+def plot_rtt_distribution(df, save_dir, filename_prefix="combined", hue: str | None = None):
     """
-    Plots the RTT distribution (KDE) for each target IP.
+    Plot RTT distribution (KDE).
+
+    - Adds legend automatically.
+    - Ensures density is not drawn for negative RTTs.
+    - If hue is None, chooses 'probe_type' when both DNS/ICMP exist; else 'target_ip'.
     """
     fig, ax = plt.subplots(figsize=(12, 7))
 
+    df_plot = _ensure_non_negative_rtt(df)
+    # Decide hue and legend title
+    if hue is None:
+        hue, legend_title = _auto_hue(df_plot)
+    else:
+        legend_title = 'Probe Type' if hue == 'probe_type' else 'Target IP'
+
     sns.kdeplot(
-        data=df, x='rtt_ms', hue='target_ip', fill=True,
-        common_norm=False, alpha=0.25, linewidth=1.5, ax=ax
+        data=df_plot,
+        x='rtt_ms',
+        hue=hue,
+        fill=True,
+        common_norm=False,
+        alpha=0.25,
+        linewidth=1.5,
+        ax=ax,
+        clip=(0, None),  # do not draw negative densities
+        cut=0,
     )
 
     ax.set_title('RTT Distribution (KDE)')
     ax.set_xlabel('RTT (ms)')
     ax.set_ylabel('Density')
-    _maybe_add_legend(ax, title='Target IP')
+    ax.set_xlim(left=0)
+    _maybe_add_legend(ax, title=legend_title)
 
     fig.tight_layout()
     save_plot(fig, save_dir, f'{filename_prefix}_rtt_distribution_kde.png')
@@ -106,3 +144,60 @@ def plot_rtt_boxplot(df, save_dir, filename_prefix="combined"):
 
     fig.tight_layout()
     save_plot(fig, save_dir, f'{filename_prefix}_rtt_boxplot.png')
+
+
+def plot_rtt_histogram(
+    df,
+    save_dir,
+    filename_prefix: str = "combined",
+    bins: int = 50,
+    kde: bool = False,
+    hue: str | None = None,
+):
+    """Plot RTT histogram with optional KDE overlay.
+
+    - Non-negative RTTs enforced.
+    - If hue is None, selects automatically (probe_type preferred when available).
+    """
+    fig, ax = plt.subplots(figsize=(12, 7))
+
+    df_plot = _ensure_non_negative_rtt(df)
+    if hue is None:
+        hue, legend_title = _auto_hue(df_plot)
+    else:
+        legend_title = 'Probe Type' if hue == 'probe_type' else 'Target IP'
+
+    sns.histplot(
+        data=df_plot,
+        x='rtt_ms',
+        hue=hue,
+        bins=bins,
+        stat='density',
+        common_norm=False,
+        multiple='layer',
+        element='step',
+        fill=False,
+        ax=ax,
+    )
+
+    if kde:
+        sns.kdeplot(
+            data=df_plot,
+            x='rtt_ms',
+            hue=hue,
+            common_norm=False,
+            ax=ax,
+            clip=(0, None),
+            cut=0,
+            linewidth=1.2,
+            alpha=0.9,
+        )
+
+    ax.set_title('RTT Distribution (Histogram)')
+    ax.set_xlabel('RTT (ms)')
+    ax.set_ylabel('Density')
+    ax.set_xlim(left=0)
+    _maybe_add_legend(ax, title=legend_title)
+
+    fig.tight_layout()
+    save_plot(fig, save_dir, f'{filename_prefix}_rtt_histogram.png')
