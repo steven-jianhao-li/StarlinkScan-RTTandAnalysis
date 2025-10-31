@@ -289,9 +289,9 @@ def run_pair_workflow():
         'default': ThreadPoolExecutor(config.getint('General', 'worker_threads', fallback=10))
     }
     job_defaults = {
-        'coalesce': True,                 # Combine missed runs into one
-        'max_instances': 1,               # Avoid overlapping probes per job
-        'misfire_grace_time': 10          # Seconds to allow late runs
+        'coalesce': config.getboolean('Scheduler', 'coalesce', fallback=True),  # Combine missed runs
+        'max_instances': config.getint('Scheduler', 'job_max_instances', fallback=1),  # Overlaps per job
+        'misfire_grace_time': 10
     }
     scheduler = BackgroundScheduler(executors=executors, job_defaults=job_defaults)
 
@@ -453,8 +453,8 @@ def run_mass_scan():
         'default': ThreadPoolExecutor(config.getint('General', 'worker_threads', fallback=10))
     }
     job_defaults = {
-        'coalesce': True,
-        'max_instances': 1,
+        'coalesce': config.getboolean('Scheduler', 'coalesce', fallback=True),
+        'max_instances': config.getint('Scheduler', 'job_max_instances', fallback=1),
         'misfire_grace_time': 10
     }
     scheduler = BackgroundScheduler(executors=executors, job_defaults=job_defaults)
