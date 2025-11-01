@@ -30,8 +30,8 @@ class MassRTTAnalyzer:
 
     def __init__(self, result_dir: str, analyses: list[str] | None = None):
         self.result_dir = result_dir
-        # 支持：summary_by_ip,summary_by_label,mean_hist,mean_vs_loss,kde_by_label,cdf_by_label,box_violin_by_label,topn
-        self.analyses = analyses or ['summary_by_ip','summary_by_label','mean_hist','mean_vs_loss','kde_by_label']
+        # 支持：summary_by_ip,summary_by_label,mean_hist,mean_vs_loss,kde_by_label,cdf_by_label,box_violin_by_label,topn,hist_by_label,rtt_hist
+        self.analyses = analyses or ['summary_by_ip','summary_by_label','mean_hist','mean_vs_loss','kde_by_label','hist_by_label']
 
     def _do(self, key: str) -> bool:
         return key in self.analyses or 'all' in self.analyses
@@ -74,6 +74,17 @@ class MassRTTAnalyzer:
         # success-only RTTs
         ok = df[(df['status'] == 'success') & (df['rtt_ms'].notnull())].copy()
 
+        # Overall RTT histogram（所有数据，不分组）
+        if self._do('rtt_hist'):
+            fig, ax = plt.subplots(figsize=(12, 7))
+            sns.histplot(ok['rtt_ms'], bins=60, stat='density', kde=False, element='step', fill=False, ax=ax)
+            ax.set_title('RTT Distribution (All) - Histogram')
+            ax.set_xlabel('RTT (ms)')
+            ax.set_ylabel('Density')
+            ax.set_xlim(left=0)
+            fig.tight_layout()
+            save_plot(fig, self.result_dir, 'rtt_hist_all.png')
+
         # Aggregate per IP
         agg = ok.groupby('target_ip')['rtt_ms'].agg(
             count='count', mean='mean', median='median', p95=lambda s: s.quantile(0.95),
@@ -112,7 +123,7 @@ class MassRTTAnalyzer:
             save_plot(fig, self.result_dir, 'mean_vs_loss_scatter.png')
 
         # Optional: if labels exist, compare distributions per label
-        if 'label' in ok.columns and (self._do('summary_by_label') or self._do('kde_by_label') or self._do('cdf_by_label') or self._do('box_violin_by_label')):
+        if 'label' in ok.columns and (self._do('summary_by_label') or self._do('kde_by_label') or self._do('cdf_by_label') or self._do('box_violin_by_label') or self._do('hist_by_label')):
             # per-label summary
             if self._do('summary_by_label'):
                 label_summary = ok.groupby('label')['rtt_ms'].agg(
@@ -130,6 +141,17 @@ class MassRTTAnalyzer:
                 ax.set_xlim(left=0)
                 fig.tight_layout()
                 save_plot(fig, self.result_dir, 'kde_by_label.png')
+
+            # Histogram per label
+            if self._do('hist_by_label'):
+                fig, ax = plt.subplots(figsize=(12, 7))
+                sns.histplot(data=ok, x='rtt_ms', hue='label', bins=60, stat='density', element='step', fill=False, common_norm=False, multiple='layer', ax=ax)
+                ax.set_title('RTT Distribution by Label (Histogram)')
+                ax.set_xlabel('RTT (ms)')
+                ax.set_ylabel('Density')
+                ax.set_xlim(left=0)
+                fig.tight_layout()
+                save_plot(fig, self.result_dir, 'hist_by_label.png')
 
             # CDF per label
             if self._do('cdf_by_label'):
@@ -165,7 +187,6 @@ class MassRTTAnalyzer:
         # TopN CSVs（低均值/低p95/低丢包 + 反向榜）
         if self._do('topn'):
             for n in (20,):
-                cols = ['mean', 'p95', 'loss_pct']
                 # 低值榜
                 summary.nsmallest(n, 'mean').to_csv(os.path.join(self.result_dir, f'top{n}_low_mean.csv'))
                 summary.nsmallest(n, 'p95').to_csv(os.path.join(self.result_dir, f'top{n}_low_p95.csv'))

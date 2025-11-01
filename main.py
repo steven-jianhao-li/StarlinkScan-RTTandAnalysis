@@ -511,7 +511,20 @@ def run_mass_scan():
         for p in (io_ground, io_sat):
             if p.is_alive():
                 p.terminate()
-        logger.info("Mass scan finished.")
+        logger.info("Mass scan finished. Preparing mass analysis (if enabled)...")
+
+        # Auto analyze mass results if enabled
+        try:
+            if config.getboolean('MassScan', 'auto_analyze_after', fallback=True):
+                from src.analysis.mass_rtt_analyzer import MassRTTAnalyzer
+                selected = ['summary_by_ip','summary_by_label','mean_hist','mean_vs_loss','kde_by_label','hist_by_label']
+                analyzer = MassRTTAnalyzer(result_root, analyses=selected)
+                analyzer.run()
+                logger.info("Mass analysis finished.")
+            else:
+                logger.info("Mass analysis skipped due to config.")
+        except Exception as e:
+            logger.error(f"Mass analysis failed: {e}", exc_info=True)
 
 
 def prompt_mode_if_needed(args_mode: str | None) -> str:
@@ -591,6 +604,36 @@ def _build_pair_from_mass_dataset(result_dir: str, ground_ip: str, sat_ip: str, 
     return out_dir
 
 
+def _list_timestamp_dirs(base_dir: str, limit: int = 5) -> list[str]:
+    try:
+        if not os.path.isdir(base_dir):
+            return []
+        dirs = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
+        # 只保留看起来像时间戳的目录
+        dirs = [d for d in dirs if len(d) == 15 and d[8] == 'T' and d.isalnum()]
+        dirs.sort(reverse=True)
+        return dirs[:limit]
+    except Exception:
+        return []
+
+
+def _prompt_for_dir_with_suggestions(title: str, base_dir: str) -> str:
+    """Print last N timestamp directories under base_dir and prompt user with default example."""
+    suggestions = _list_timestamp_dirs(base_dir, limit=5)
+    print(title)
+    print(f"示例: {base_dir}/20251101T021045")
+    if suggestions:
+        print("最近任务：")
+        for d in suggestions:
+            print(f"  - {d}")
+        default = suggestions[0]
+        inp = input(f"请输入目录（留空默认 '{default}'）: ").strip()
+        return os.path.join(base_dir, (inp or default))
+    else:
+        inp = input(f"请输入目录（形如 {base_dir}/YYYYMMDDTHHMMSS）: ").strip()
+        return inp
+
+
 def main():
     parser = argparse.ArgumentParser(description='Starlink RTT Scanner/Analyzer')
     parser.add_argument('--mode', choices=['pair', 'mass-scan', 'analyze-pair', 'analyze-mass', 'analyze-pair-from-mass'], help='运行模式')
@@ -605,7 +648,8 @@ def main():
         run_mass_scan()
     elif mode == 'analyze-pair':
         # 分析两点结果
-        task_dir = args.input or input('请输入两点结果目录路径: ').strip()
+        base = os.path.join(PROJECT_ROOT, 'data', 'output')
+        task_dir = args.input or _prompt_for_dir_with_suggestions('请输入两点结果目录:', base)
         if not os.path.isdir(task_dir):
             print(f"目录不存在: {task_dir}", file=sys.stderr)
             sys.exit(2)
@@ -617,7 +661,8 @@ def main():
         analyzer.run()
     elif mode == 'analyze-mass':
         # 分析大规模结果
-        result_dir = args.input or input('请输入大规模扫描结果目录（包含一堆按IP命名的CSV）: ').strip()
+        base = os.path.join(PROJECT_ROOT, 'data', 'output', 'mass')
+        result_dir = args.input or _prompt_for_dir_with_suggestions('请输入大规模扫描结果目录（包含 ground/ 与 satellite/）:', base)
         if not os.path.isdir(result_dir):
             print(f"目录不存在: {result_dir}", file=sys.stderr)
             sys.exit(2)
@@ -628,7 +673,8 @@ def main():
         analyzer.run()
     elif mode == 'analyze-pair-from-mass':
         # 从大规模结果中选两IP做两点分析
-        result_dir = args.input or input('请输入大规模扫描结果目录（data/output/mass/<timestamp>）: ').strip()
+        base = os.path.join(PROJECT_ROOT, 'data', 'output', 'mass')
+        result_dir = args.input or _prompt_for_dir_with_suggestions('请输入大规模扫描结果目录（data/output/mass/<timestamp>）:', base)
         if not os.path.isdir(result_dir):
             print(f"目录不存在: {result_dir}", file=sys.stderr)
             sys.exit(2)
